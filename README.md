@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Global validation of the Advanced Change Detection and Short-Term Change Detections (STCDs)
 This repository is for a global validaton of soil moisture retrieval algorithms
 
