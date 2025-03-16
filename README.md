@@ -1,6 +1,6 @@
 # Soil Moisture Estimation Using Satellite Images
 ## Overview
-This repository contains code implementations for soil moisture estimation based on the research paper titled **"Integration of Sentinel-1A Radar and SMAP Radiometer for Soil Moisture Retrieval over Vegetated Areas"** by Saeed Arab, Greg Easson, and Zahra Ghaffari. The paper discusses the integration of Sentinel-1A radar data with SMAP radiometer data to improve soil moisture retrieval in vegetated areas.
+This repository contains code implementations for soil moisture estimation based on the research paper titled **"[Integration of Sentinel-1A Radar and SMAP Radiometer for Soil Moisture Retrieval over Vegetated Areas](https://www.researchgate.net/publication/379454081_Integration_of_Sentinel-1A_Radar_and_SMAP_Radiometer_for_Soil_Moisture_Retrieval_over_Vegetated_Areas)"** by Saeed Arab, Greg Easson, and Zahra Ghaffari. The paper discusses the integration of Sentinel-1A radar data with SMAP radiometer data to improve soil moisture retrieval in vegetated areas.
 
 ## Features
 - Integration of Sentinel-1A radar data with SMAP radiometer data.
