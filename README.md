@@ -7,7 +7,7 @@ This repository contains code implementations for soil moisture estimation based
 - Implementation of the Smoothing Filter-based Intensity Modulation (SFIM) method for downscaling.
 - Use of Artificial Neural Networks (ANN) for improved soil moisture predictions.
 
-## Part I: Data preparation
+## Data preparation
 
 ### In-situ soil moisture
 Ground soil moisture measurements are available at https://ismn.geo.tuwien.ac.at/en/.
@@ -24,6 +24,3 @@ The SMAP data is available at https://nsidc.org/data/SPL3SMP. A pyhton script ca
 An google developer account is required to access the GEE
 
 The https://github.com/giswqs/geemap is suggested for the setup of GEE
-
-## Part II: A python version of advanced change detection and short term change detection methods
-comming soon
