@@ -1,0 +1,385 @@
+// Function to get district geometry
+function getDistrict(districtName) {
+  var districtList = ee.FeatureCollection('projects/xuantruong/assets/VN_Districts3_Updated5')
+                   .filter(ee.Filter.eq('district', districtName));
+  return districtList.geometry().bounds();
+}
+
+// Function to get commune geometry
+function getCommune(communeName, districtName) {
+  var communeList = ee.FeatureCollection('projects/xuantruong/assets/VN_Commune')
+                   .filter(ee.Filter.eq('district', districtName))
+                   .filter(ee.Filter.eq('commune', communeName));
+  return communeList.geometry().bounds();
+}
+
+
+//Load Sentinel-2 collection and mask clouds
+function getSentinelCollection(startDate, endDate) {
+  
+  var sDate = startDate.advance(-8, 'day');
+  var eDate = endDate.advance(8, 'day');
+  
+  var csPlus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED');
+  var QA_BAND = 'cs';
+  var CLEAR_THRESHOLD = 0.5;
+  
+  var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                    .filterBounds(ROI)
+                    .filterDate(sDate, eDate)
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 85))
+                    .linkCollection(csPlus, [QA_BAND]);
+  
+  var cloudMaskedSentinel2 = sentinel2.map(function(img) {
+    return img.updateMask(img.select(QA_BAND).gte(CLEAR_THRESHOLD)).clip(ROI);
+  })
+  
+  return cloudMaskedSentinel2;
+}
+
+
+// Hàm lọc mây Sentinel-2 khác sử dụng SCL và QA60
+function cloudMaskingSentinel(image) {
+  var qa = image.select('QA60');
+  var scl = image.select('SCL');
+  
+  // Tạo mặt nạ mây bằng cách loại bỏ các giá trị liên quan đến mây và bóng mây
+  var cloudMask = qa.bitwiseAnd(1 << 10).eq(0) // Không có mây trong QA60
+                    .and(scl.neq(3))           // Không có bóng mây
+                    .and(scl.neq(8))           // Không có vùng tạm dừng
+                    .and(scl.neq(9))           // Không có mây 
+                    .and(scl.neq(10));         // Không có mây mỏng hoặc mây cao
+  
+  // Áp dụng mặt nạ mây cho ảnh và trả về kết quả
+  return image.updateMask(cloudMask);
+}
+
+function getNonCloudNDVICollection(cloudFreeCollection) {
+  var sentinel2 = cloudFreeCollection.map(function(image) {
+        var dateOnly = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd');
+        return image.set('date_only', dateOnly);
+      });
+
+  // Lấy các ngày duy nhất
+  var uniqueDates = sentinel2.distinct(['date_only']);
+
+  // Ghép mosaic và tính NDVI cho các ảnh trong cùng ngày
+  var mosaicCollection = uniqueDates.map(function(dateImage) {
+    var date = ee.Date(dateImage.get('system:time_start'));
+    var dateOnly = ee.String(dateImage.get('date_only'));
+
+    // Lọc các ảnh trong cùng ngày
+    var dailyImages = sentinel2.filter(ee.Filter.eq('date_only', dateOnly));
+
+    // Ghép mosaic và tính NDVI
+    var mosaic = dailyImages.mosaic()
+                  .normalizedDifference(['B8', 'B4'])
+                  .rename('NDVI');
+
+    // Áp dụng mask cropland vào NDVI mosaic và thiết lập thuộc tính system:time_start
+    return mosaic.set('system:time_start', date.millis());
+  });
+
+  return ee.ImageCollection(mosaicCollection);
+}
+
+
+// Separate cloud-free and cloudy NDVI collections
+function separateCollections(ndviCollection) {
+  var cloudFreeCollection = ndviCollection.filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 2));
+  var cloudyCollection = ndviCollection.filter(ee.Filter.gt('CLOUDY_PIXEL_PERCENTAGE', 2));
+  return { cloudFree: cloudFreeCollection, cloudy: cloudyCollection };
+}
+
+//Calculate 8-day NDVI composites with NDVI calculation in this function
+function calculate8DayComposites(imageCollection, startDate, endDate) {
+  var daysStep = 8;  // Define the step in days
+  var start = ee.Date(startDate);
+  var end = ee.Date(endDate);
+  
+  // Create a list of start dates for each 8-day period
+  var listOfDates = ee.List.sequence(start.millis(), end.millis(), daysStep * 24 * 60 * 60 * 1000);
+  
+  return ee.ImageCollection(listOfDates.map(function(millis) {
+    var compositeCenter = ee.Date(millis);
+    var compositeStart = compositeCenter.advance(-8, 'day');
+    var compositeEnd = compositeCenter.advance(8, 'day');
+    
+    var periodCollection = imageCollection.filterDate(compositeStart, compositeEnd);
+    
+    // Nếu có ảnh trong khoảng thời gian, tính NDVI bình quân, nếu không tạo ảnh rỗng
+    var compositeImage = ee.Algorithms.If(
+      periodCollection.size().gt(0),
+      periodCollection.median().normalizedDifference(['B8', 'B4']).rename('NDVI').set('system:time_start', compositeCenter.millis()),
+      ee.Image().set('system:time_start', excludeDate)
+    );
+    return compositeImage;
+  }));  
+}
+
+// Tính NDVI
+function calculateNDVICollection(imageCollection) {
+  return imageCollection.map(function(image) {
+    var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI').copyProperties(image, ['system:time_start']);
+    return ndvi;
+  });
+}
+
+// Hàm để hiển thị các ảnh Sentinel-2 lên bản đồ
+function displaySentinel(imageCollection, layerName) {
+  // Chuyển đổi imageCollection thành danh sách các ảnh (List)
+  var imageList = imageCollection.toList(imageCollection.size());
+  
+  // Duyệt qua từng ảnh trong danh sách
+  for (var i = 0; i < imageCollection.size().getInfo(); i++) {
+    var image = ee.Image(imageList.get(i));
+    
+    var hasBands = image.bandNames().contains('B4').getInfo();
+    
+    if (hasBands) {
+      var date = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo(); // Lấy ngày chụp ảnh
+      Map.addLayer(image, {bands: ['B4', 'B3', 'B2'], min: 0, max: 3000}, layerName + ' ' + date);
+    }
+  }
+}
+
+
+function displayNDVI(imageCollection, layerName) {
+  // Chuyển đổi imageCollection thành danh sách các ảnh (List)
+  var imageList = imageCollection.toList(imageCollection.size());
+  
+  // Duyệt qua từng ảnh trong danh sách
+  for (var i = 0; i < imageCollection.size().getInfo(); i++) {
+    var image = ee.Image(imageList.get(i));
+    
+    var hasBands = image.bandNames().contains('NDVI').getInfo();
+    
+    if (hasBands) {
+      var date = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo(); // Lấy ngày chụp ảnh
+      Map.addLayer(image, {min: -1, max: 1, palette: ['blue', 'white', 'green']}, layerName + ' ' + date);
+    }
+  }
+}
+
+
+
+//Export NDVI 
+function exportNDVI(ndviComposites, roi, ndviName, folderName) {
+  
+  var imageList = ndviComposites.toList(ndviComposites.size());
+  
+  // Duyệt qua từng ảnh trong danh sách
+  for (var i = 0; i < ndviComposites.size().getInfo(); i++) {
+    var image = ee.Image(imageList.get(i));
+    
+    var hasBands = image.bandNames().contains('NDVI').getInfo();
+    
+    if (hasBands) {
+      var dateStr = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo(); // Lấy ngày chụp ảnh
+      Export.image.toDrive({
+        image: image.select('NDVI'),
+        description: ndviName + dateStr,
+        folder: folderName,
+        scale: 10,
+        region: roi,
+        fileFormat: 'GeoTIFF',
+        maxPixels: 1e13
+      });
+    }
+  }
+}
+
+function exportNDVIToAsset(ndviComposites, roi, ndviName, imageCollection) {
+  // Chuyển bộ sưu tập NDVI thành danh sách ảnh
+  var imageList = ndviComposites.toList(ndviComposites.size());
+  
+  // Duyệt qua từng ảnh trong danh sách
+  var imageCount = ndviComposites.size().getInfo(); // Số lượng ảnh
+  for (var i = 0; i < imageCount; i++) {
+    var image = ee.Image(imageList.get(i)); // Lấy từng ảnh NDVI
+    var hasBands = image.bandNames().contains('NDVI').getInfo(); // Kiểm tra xem có băng 'NDVI' không
+
+    if (hasBands) {
+      var dateStr = ee.Date(image.get('system:time_start')).format('YYYY-MM-dd').getInfo(); // Lấy ngày chụp ảnh
+      var assetId = imageCollection + '/' + ndviName + dateStr; // Đường dẫn Asset
+
+      // Xuất ảnh vào Asset
+      Export.image.toAsset({
+        image: image.select('NDVI'), // Chỉ xuất băng 'NDVI'
+        description: ndviName + '_' + dateStr, // Mô tả cho tác vụ xuất
+        assetId: assetId, // Đường dẫn Asset
+        scale: 10, // Độ phân giải
+        region: roi, // Vùng xuất
+        maxPixels: 1e13 // Giới hạn số pixel
+      });
+    }
+  }
+}
+
+
+function createGrid(ROI) {
+  // Lấy thông tin về hình học (bounds) của ROI
+  var bounds = ROI.bounds();
+
+  // Lấy tọa độ của bounding box
+  var bboxCoords = ee.List(bounds.coordinates().get(0));
+  var xMin = ee.Number(ee.List(bboxCoords.get(0)).get(0)); // Kinh độ nhỏ nhất
+  var yMin = ee.Number(ee.List(bboxCoords.get(0)).get(1)); // Vĩ độ nhỏ nhất
+  var xMax = ee.Number(ee.List(bboxCoords.get(2)).get(0)); // Kinh độ lớn nhất
+  var yMax = ee.Number(ee.List(bboxCoords.get(2)).get(1)); // Vĩ độ lớn nhất
+
+  // Tính kích thước của mỗi ô
+  var xStep = xMax.subtract(xMin).divide(20); // Chia chiều rộng thành 10 phần
+  var yStep = yMax.subtract(yMin).divide(20); // Chia chiều cao thành 10 phần
+
+  // Tạo danh sách các bước theo trục x và y
+  var xSteps = ee.List.sequence(xMin, xMax.subtract(xStep), xStep);
+  var ySteps = ee.List.sequence(yMin, yMax.subtract(yStep), yStep);
+
+  // Ánh xạ để tạo các ô lưới (grid cells)
+  var gridCells = xSteps.map(function (xStart) {
+    return ySteps.map(function (yStart) {
+      var xEnd = ee.Number(xStart).add(xStep);
+      var yEnd = ee.Number(yStart).add(yStep);
+
+      // Kiểm tra và giới hạn các ô nằm trong ROI
+      var cell = ee.Feature(ee.Geometry.Rectangle([xStart, yStart, xEnd, yEnd]));
+      return cell.intersection(ROI, ee.ErrorMargin(1));
+    });
+  }).flatten();
+
+  // Trả về tập hợp các ô lưới (FeatureCollection)
+  return ee.FeatureCollection(gridCells);
+}
+
+
+
+function createGridMask(ROI, percentage, grid, seed) {
+  // Tạo một ảnh ngẫu nhiên
+  var randomImage = ee.Image.random(seed).clip(ROI);
+
+  // Gắn giá trị ngẫu nhiên vào mỗi ô trong lưới
+  var gridWithRandom = grid.map(function (feature) {
+    var meanRandomValue = randomImage.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: feature.geometry(),
+      scale: 10, // Scale phù hợp với kích thước pixel của ảnh
+      maxPixels: 1e13
+    }).get('random');
+
+    return feature.set('random', meanRandomValue);
+  });
+
+  // Số lượng ô cần chọn dựa trên tỷ lệ phần trăm
+  var totalGrids = gridWithRandom.size();
+  var selectedGridsCount = ee.Number(totalGrids).multiply(percentage).divide(100).round();
+
+  // Sắp xếp lưới theo giá trị ngẫu nhiên
+  var sortedGrid = gridWithRandom.sort('random');
+
+  // Chọn các ô theo tỷ lệ phần trăm
+  var selectedGrid = sortedGrid.limit(selectedGridsCount);
+
+  // Tạo mặt nạ từ các ô đã chọn
+  var mask = selectedGrid.reduceToImage({
+    properties: ['random'],
+    reducer: ee.Reducer.first()
+  }).unmask(0); // Gán giá trị mặc định là 0 cho vùng ngoài mask
+
+  return mask;
+}
+
+
+function createCloudSimulatedNDVICollections(imageCollection, cloudMaskPercentage, ROI) {
+  
+  // Tạo lưới (grid) chia ROI thành 10x10 ô
+  var grid = createGrid(ROI); // Không cần `gridSize`, vì lưới đã được chia thành 10x10 ô.
+  
+  // Hàm xử lý từng ảnh
+  function processImage(image) {
+    var seed = image.get('system:time_start')
+    // Tạo mặt nạ mây từ grid
+    var cloudMask = createGridMask(ROI, cloudMaskPercentage, grid, seed); // Kích thước lưới (đơn vị độ)
+
+    // Áp dụng mặt nạ mây lên ảnh NDVI gốc
+    var cloudedNDVI = image.updateMask(cloudMask.not());
+
+    // Trích xuất NDVI tại các vùng giả lập mây
+    var extractedCloudNDVI = image.updateMask(cloudMask);
+
+    // Gắn thuộc tính thời gian
+    cloudedNDVI = cloudedNDVI.set('system:time_start', image.get('system:time_start'));
+    extractedCloudNDVI = extractedCloudNDVI.set('system:time_start', image.get('system:time_start'));
+
+    return { clouded: cloudedNDVI, extracted: extractedCloudNDVI };
+  }
+
+  // Áp dụng cho từng ảnh trong bộ sưu tập
+  var cloudedNDVICollection = imageCollection.map(function (image) {
+    return processImage(image).clouded;
+  });
+
+  var extractedCloudNDVICollection = imageCollection.map(function (image) {
+    return processImage(image).extracted;
+  });
+
+  // Trả về hai bộ sưu tập
+  return {
+    cloudedCollection: ee.ImageCollection(cloudedNDVICollection),
+    extractedCollection: ee.ImageCollection(extractedCloudNDVICollection)
+  };
+}
+
+
+
+// Define ROI and time period
+var startDate = ee.Date('2023-01-01');
+var endDate = ee.Date('2025-01-01')
+
+//var ROI = getCommune('Xã Thụy Văn', 'Huyện Thái Thụy');
+//var ROI = getCommune('Xã Hòa Mỹ', 'Huyện Cái Nước');
+//var ROI = getCommune('Xã Vĩnh Hưng', 'Huyện Vĩnh Lợi');
+//var ROI = getCommune('Xã Bình Trung', 'Huyện Bình Sơn');
+//var ROI = getCommune('Xã Thanh Bình', 'Huyện Trảng Bom');
+// var ROI = getCommune('Xã Yên Minh', 'Huyện Ý Yên');
+
+var ROI = ee.Geometry.Polygon([
+[[11855180.0, 2328782.140517925], [11855180.0, 2335016.8225009246], [11851160.0, 2335016.8225009246], [11851160.0, 2328782.140517925], [11855180.0, 2328782.140517925]]
+], 'EPSG:3857');
+
+var excludeDate = ee.Date('1900-01-01').millis();
+
+// Thêm ROI vào bản đồ
+// Map.centerObject(ROI, 13);  // Phóng to vào ROI
+// Map.addLayer(ROI, {color: 'red'}, 'ROI');  // Thêm lớp ROI với màu đỏ
+
+
+// Run each step
+var sentinelCollection = getSentinelCollection(startDate, endDate);
+//displaySentinel(sentinelCollection, "An Phu")
+
+var collections = separateCollections(sentinelCollection);
+print('Cloudy:', collections.cloudy.size())
+print('NonCloud:', collections.cloudFree.size())
+
+var ndviCompositesCloudy = calculate8DayComposites(collections.cloudy, startDate, endDate);
+//displayNDVI(ndviCompositesCloudy, 'Cloudy NDVI')
+
+var ndviCompositesNonCloud = getNonCloudNDVICollection(collections.cloudFree);
+//displayNDVI(ndviCompositesNonCloud, 'NonCloud NDVI')
+
+exportNDVI(ndviCompositesCloudy, ROI, 'ndvi8days_', 'thaiphuc_ndvi8days')
+exportNDVI(ndviCompositesNonCloud, ROI, 'ndvinoncloud_', 'thaiphuc_ndvinoncloud')
+
+
+
+//var cloudSimulatedNDVI = createCloudSimulatedNDVICollections(ndviCompositesCloudy, 15, ROI);
+//displayNDVI(cloudSimulatedNDVI.cloudedCollection, 'cloudedCollection NDVI')
+//displayNDVI(cloudSimulatedNDVI.extractedCollection, 'extractedCollection NDVI')
+
+
+//exportNDVI(cloudSimulatedNDVI.cloudedCollection, ROI, 'anphu_ndvi8days_', 'anphu_ndvi8days')
+//exportNDVI(ndviCompositesNonCloud, ROI, 'anphu_ndvinoncloud_', 'anphu_ndvinoncloud')
+//exportNDVIToAsset(cloudSimulatedNDVI.extractedCollection, ROI, 'anphu_ndvi8days_', 'projects/xuantruong/assets/anphu_ndvi8days') 
+
+

@@ -1,0 +1,14 @@
+Đề cập đến địa hình của Hawaii
+
+
+đề xuất rằng lỗi đại diện không gian có thể là 0,02 m3/m3 cho diện tích phẳng nếu chỉ có 1 trạm để truy xuất ở 1 km.
+
+Một lỗi bình phương trung bình không thiên vị mục tiêu (RMSE) là 0,06 m3/m3 đã được xác định cho các sản phẩm nhiệm vụ độ ẩm đất dựa trên radar
+
+Test trên 1 vùng, mô tả địa hình.
+- Tải dữ liệu NDVI 10m
+- Tải dữ liệu LST
+- Tiền xử lý dữ liệu Sentinel-1, NDVI => 1km
+- Triển khai thuật toán SFIM
+- Train
+- Đánh giá.
